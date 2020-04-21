@@ -1,7 +1,8 @@
 
 import logging
+from elasticsearch import Elasticsearch
 
-from pygeoapi.process.base import BaseProcessor
+from pygeoapi.process.base import BaseProcessor, ProcessorExecuteError
 
 
 LOGGER = logging.getLogger(__name__)
@@ -155,7 +156,83 @@ class MetricsProcessor(BaseProcessor):
 
         BaseProcessor.__init__(self, provider_def, PROCESS_SETTINGS)
 
+        url_tokens = provider_def['elastic_path'].split('/')
+
+        LOGGER.debug('Setting Elasticsearch properties')
+        self.index = url_tokens[-1]
+        host = url_tokens[2]
+
+        LOGGER.debug('Host: {}'.format(host))
+        LOGGER.debug('Index name: {}'.format(self.index))
+
+        LOGGER.debug('Connecting to Elasticsearch')
+        self.es = Elasticsearch(host)
+
+        if not self.es.ping():
+            msg = 'Cannot connect to Elasticsearch'
+            LOGGER.error(msg)
+            raise ProcessorExecuteError(msg)
+
+        LOGGER.debug('Checking Elasticsearch version')
+        version = float(self.es.info()['version']['number'][:3])
+        if version < 7:
+            msg = 'Elasticsearch version below 7 not supported ({})' \
+                  .format(version)
+            LOGGER.error(msg)
+            raise ProcessorExecuteError(msg)
+
     def execute(self, inputs):
+        domain = inputs['domain']
+        timescale = inputs['timescale']
+
+        if domain == 'dataset':
+            country = inputs.get('country', None)
+            station = inputs.get('station', None)
+            network = inputs.get('network', None)
+
+            return self.metrics_dataset(timescale, country, station, network)
+        elif domain == 'contributor':
+            dataset = inputs.get('dataset', None)
+            station = inputs.get('station', None)
+            network = inputs.get('network', None)
+
+            return self.metrics_contributor(timescale, dataset, station,
+                                            network)
+
+    def metrics_dataset(self, timescale, country=None, station=None,
+                        network=None):
+        """
+        Returns submission metrics from the WOUDC Data Registry, describing
+        number of files and observations submitted for each dataset over
+        periods of time.
+
+        Optionally filters for matching value of country, station, and network,
+        if specified.
+
+        :param timescale: Either 'year' or 'month', describing time range size.
+        :param country: Optional country code to filter by.
+        :param station: Optional station ID to filter by.
+        :param network: Optional instrument name to filter by. 
+        """
+
+        return {}
+
+    def metrics_contributor(self, timescale, dataset=None, station=None,
+                            network=None):
+        """
+        Returns submission metrics from the WOUDC Data Registry, describing
+        number of files and observations submitted from each agency over
+        periods of time.
+
+        Optionally filters for matching value of dataset, station, and network,
+        if specified.
+
+        :param timescale: Either 'year' or 'month', describing time range size.
+        :param country: Optional dataset name to filter by.
+        :param station: Optional station ID to filter by.
+        :param network: Optional instrument name to filter by. 
+        """
+
         return {}
 
     def __repr__(self):

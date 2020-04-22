@@ -241,12 +241,7 @@ class MetricsProcessor(BaseProcessor):
         if domain == 'dataset':
             return self.metrics_dataset(timescale, **inputs)
         elif domain == 'contributor':
-            dataset = inputs.get('dataset', None)
-            station = inputs.get('station', None)
-            network = inputs.get('network', None)
-
-            return self.metrics_contributor(timescale, dataset, station,
-                                            network)
+            return self.metrics_contributor(timescale, **inputs)
 
     def metrics_dataset(self, timescale, **kwargs):
         """
@@ -306,37 +301,98 @@ class MetricsProcessor(BaseProcessor):
         }
 
         filterables = ['country', 'station', 'network']
+        filterables.reverse()
 
         for category in filterables:
             if category in kwargs:
                 query = wrap_filter(query, category, kwargs[category])
 
         response = self.es.search(index=self.index, body=query)
-
         filterables.reverse()
+
         for category in filterables:
             if category in kwargs:
                 response = unwrap_filter(response, category)
 
         return response
 
-    def metrics_contributor(self, timescale, dataset=None, station=None,
-                            network=None):
+    def metrics_contributor(self, timescale, **kwargs):
         """
         Returns submission metrics from the WOUDC Data Registry, describing
         number of files and observations submitted from each agency over
         periods of time.
 
         Optionally filters for matching value of dataset, station, and network,
-        if specified.
+        if specified as kwargs.
 
         :param timescale: Either 'year' or 'month', describing time range size.
-        :param country: Optional dataset name to filter by.
-        :param station: Optional station ID to filter by.
-        :param network: Optional instrument name to filter by. 
+        :param kwargs: Optional property values to filter by.
         """
 
-        return {}
+        if timescale == 'year':
+            date_interval = '1y'
+            date_format = 'yyyy'
+        elif timescale == 'month':
+            date_interval = '1M'
+            date_format = 'yyyy-MM'
+        date_aggregation_name = '{}ly'.format(timescale)
+
+        query_core = {
+            date_aggregation_name: {
+                'date_histogram': {
+                    'field': 'properties.timestamp_date',
+                    'calendar_interval': date_interval,
+                    'format': date_format
+                },
+                'aggregations': {
+                    'total_obs': {
+                        'sum': {
+                            'field': 'properties.number_of_observations'
+                        }
+                    }
+                }
+            }
+        }
+
+        aggregation_defs = [
+            ('total_files', 'properties.data_generation_agency.keyword'),
+            ('stations', 'properties.platform_id.keyword'),
+            ('datasets', 'properties.content_category.keyword'),
+            ('levels', 'properties.content_level'),
+            ('instruments', 'properties.instrument_name.keyword')
+        ]
+        aggregation_defs.reverse()
+
+        for aggregation_name, field in aggregation_defs:
+            query_core = {
+                aggregation_name: {
+                    'terms': {
+                        'field': field
+                    },
+                    'aggregations': query_core
+                }
+            }
+
+        query = {
+            'size': 0,
+            'aggregations': query_core
+        }
+
+        filterables = ['dataset', 'station', 'network']
+        filterables.reverse()
+
+        for category in filterables:
+            if category in kwargs:
+                query = wrap_filter(query, category, kwargs[category])
+
+        response = self.es.search(index=self.index, body=query)
+        filterables.reverse()
+
+        for category in filterables:
+            if category in kwargs:
+                response = unwrap_filter(response, category)
+
+        return response
 
     def __repr__(self):
         return '<MetricsProcessor> {}'.format(self.name)

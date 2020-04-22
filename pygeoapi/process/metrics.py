@@ -186,6 +186,55 @@ def unwrap_filter(response, category):
     return unwrapped
 
 
+def convert_to_rows(response, agg_layers, prefix=()):
+    """
+    Converts the hierarchical, dictionary type of response from an
+    an Elasticsearch query into a more SQL-like list of rows (tuples).
+
+    The Elasticsearch response is expected to have a specific format, where
+    a series of bucket aggregations are nested in each other. The names of
+    these aggregations are listed in order in <agg_layers>, from top to bottom.
+
+    The bottom-level bucket (after all these nested aggregations) must contain
+    a doc_count as well as a numerically-valued aggregation named total_obs.
+
+    Each row of the output is a tuple of values, matching each of the buckets
+    described in <agg_layers> followed by doc_count and the total_obs value.
+
+    :param response: An Elasticsearch query response dictionary.
+    :param agg_layers: List of aggregation names from top to bottom.
+    :returns: Contents of the Elasticsearch response in list-of-rows format.
+    """
+
+    if 'aggregations' in response:
+        response = response['aggregations']
+
+    if len(agg_layers) == 0:
+        total_files = response['doc_count']
+        total_obs = int(response['total_obs']['value'])
+
+        if total_files == 0:
+            return []
+        else:
+            row = prefix + (total_files, total_obs)
+            return [row]
+    else:
+        top_layer = agg_layers[0]
+        remaining_layers = agg_layers[1:]
+
+        rows = []
+        for bucket in response[top_layer]['buckets']:
+            if 'key_as_string' in bucket:
+                key = bucket['key_as_string']
+            else:
+                key = bucket['key']
+
+            next_prefix = prefix + (key,)
+            rows.extend(convert_to_rows(bucket, remaining_layers, next_prefix))
+
+        return rows
+
+
 class MetricsProcessor(BaseProcessor):
     """
     WOUDC Data Registry metrics API extension.
@@ -235,6 +284,13 @@ class MetricsProcessor(BaseProcessor):
             raise ProcessorExecuteError(msg)
 
     def execute(self, inputs):
+        """
+        Responds to an incoming request to this endpoint of the API.
+
+        :param inputs: Body of the incoming request.
+        :returns: Body of the response sent for that request.
+        """
+
         domain = inputs.pop('domain')
         timescale = inputs.pop('timescale')
 
@@ -314,7 +370,10 @@ class MetricsProcessor(BaseProcessor):
             if category in kwargs:
                 response = unwrap_filter(response, category)
 
-        return response
+        aggregation_names = ['total_files', 'levels', date_aggregation_name]
+        rows = convert_to_rows(response, aggregation_names)
+
+        return rows
 
     def metrics_contributor(self, timescale, **kwargs):
         """
@@ -392,7 +451,12 @@ class MetricsProcessor(BaseProcessor):
             if category in kwargs:
                 response = unwrap_filter(response, category)
 
-        return response
+        aggregation_defs.reverse()
+        aggregation_names = [agg_name for agg_name, _ in aggregation_defs]
+        aggregation_names.append(date_aggregation_name)
+
+        rows = convert_to_rows(response, aggregation_names)
+        return rows
 
     def __repr__(self):
         return '<MetricsProcessor> {}'.format(self.name)

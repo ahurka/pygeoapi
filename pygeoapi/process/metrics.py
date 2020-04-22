@@ -133,6 +133,59 @@ PROCESS_SETTINGS = {
 }
 
 
+def wrap_filter(query, prop, value):
+    """
+    Returns a copy of the query argumnt, wrapped in an additional
+    filter requiring the property named by <prop> have a certain value.
+
+    :param query: An Elasticsearch aggregation query dictionary.
+    :param prop: The name of a filterable property.
+    :param value: Value for the property that the query will match.
+    :returns: Query dictionary wrapping the original query in an extra filter.
+    """
+
+    property_to_field = {
+        'dataset': 'properties.content_category',
+        'country': 'properties.platform_country',
+        'station': 'properties.platform_id',
+        'network': 'properties.instrument_name'
+    }
+    field = property_to_field[prop]
+
+    wrapper = {
+        'size': 0,
+        'aggregations': {
+            prop: {
+                'filter': {
+                    'match': {
+                        field: value
+                    }
+                },
+                'aggregations': query['aggregations']
+            }
+        }
+    }
+
+    return wrapper
+
+
+def unwrap_filter(response, category):
+    """
+    Strips one layer of aggregations (named by <category>) from
+    a ElasticSearch query response, leaving it still in proper ES
+    response format.
+
+    :param response: An Elasticsearch aggregation response dictionary.
+    :param category: Name of the topmost aggregation in the response.
+    :returns: The same response, with one level of aggregation removed.
+    """
+
+    unwrapped = response.copy()
+    unwrapped['aggregations'] = response['aggregations'][category]
+
+    return unwrapped
+
+
 class MetricsProcessor(BaseProcessor):
     """
     WOUDC Data Registry metrics API extension.
@@ -182,15 +235,11 @@ class MetricsProcessor(BaseProcessor):
             raise ProcessorExecuteError(msg)
 
     def execute(self, inputs):
-        domain = inputs['domain']
-        timescale = inputs['timescale']
+        domain = inputs.pop('domain')
+        timescale = inputs.pop('timescale')
 
         if domain == 'dataset':
-            country = inputs.get('country', None)
-            station = inputs.get('station', None)
-            network = inputs.get('network', None)
-
-            return self.metrics_dataset(timescale, country, station, network)
+            return self.metrics_dataset(timescale, **inputs)
         elif domain == 'contributor':
             dataset = inputs.get('dataset', None)
             station = inputs.get('station', None)
@@ -199,23 +248,77 @@ class MetricsProcessor(BaseProcessor):
             return self.metrics_contributor(timescale, dataset, station,
                                             network)
 
-    def metrics_dataset(self, timescale, country=None, station=None,
-                        network=None):
+    def metrics_dataset(self, timescale, **kwargs):
         """
         Returns submission metrics from the WOUDC Data Registry, describing
         number of files and observations submitted for each dataset over
         periods of time.
 
         Optionally filters for matching value of country, station, and network,
-        if specified.
+        if present in kwargs.
 
         :param timescale: Either 'year' or 'month', describing time range size.
-        :param country: Optional country code to filter by.
-        :param station: Optional station ID to filter by.
-        :param network: Optional instrument name to filter by. 
+        :param kwargs: Optional property values to filter by.
         """
 
-        return {}
+        if timescale == 'year':
+            date_interval = '1y'
+            date_format = 'yyyy'
+        elif timescale == 'month':
+            date_interval = '1M'
+            date_format = 'yyyy-MM'
+        date_aggregation_name = '{}ly'.format(timescale)
+
+        query_core = {
+            date_aggregation_name: {
+                'date_histogram': {
+                    'field': 'properties.timestamp_date',
+                    'calendar_interval': date_interval,
+                    'format': date_format
+                },
+                'aggregations': {
+                    'total_obs': {
+                        'sum': {
+                            'field': 'properties.number_of_observations'
+                        }
+                    }
+                }
+            }
+        }
+
+        query = {
+            'size': 0,
+            'aggregations': {
+                'total_files': {
+                    'terms': {
+                        'field': 'properties.content_category.keyword'
+                    },
+                    'aggregations': {
+                        'levels': {
+                            'terms': {
+                                'field': 'properties.content_level'
+                            },
+                            'aggregations': query_core
+                        }
+                    }
+                }
+            }
+        }
+
+        filterables = ['country', 'station', 'network']
+
+        for category in filterables:
+            if category in kwargs:
+                query = wrap_filter(query, category, kwargs[category])
+
+        response = self.es.search(index=self.index, body=query)
+
+        filterables.reverse()
+        for category in filterables:
+            if category in kwargs:
+                response = unwrap_filter(response, category)
+
+        return response
 
     def metrics_contributor(self, timescale, dataset=None, station=None,
                             network=None):
